@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Weekwise — Kids Schedule Builder</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
 <style>
 :root {
   --cream: #FDF8F0; --paper: #FFFCF7; --ink: #2C2416; --ink2: #5C5040; --ink3: #9C8E7E;
@@ -1089,79 +1090,130 @@ function doPrint(){
 function doShareLink(){
   collectStep();
   try {
-    // Encode just the active child's data into the URL hash
-    const payload = JSON.stringify({
-      child: ch(),
-      activityNames: S.activityNames,
-      locationNames: S.locationNames,
-    });
-    const encoded = btoa(unescape(encodeURIComponent(payload)));
-    const url = location.href.split('#')[0] + '#share=' + encoded;
+    // Strip bloat — only encode what's needed to render the schedule
+    const c = ch();
+    const slim = {
+      n: c.name, w: c.wakeTime, ss: c.schoolStart, se: c.schoolEnd,
+      st: c.sleepTarget, sd: c.schoolDays,
+      a: (c.activities||[]).map(a=>({
+        nm:a.name, ci:a.colorIdx, s:a.start, e:a.end, d:a.days,
+        pd:a.perDay, ds:a.daySlots, nt:a.note,
+        tt:a.transTo, tf:a.transFrom, tm:a.transMins, loc:a.location
+      })),
+      h: (c.homework||[]).map(h=>({nm:h.name,ci:h.colorIdx,m:h.estMins,dd:h.dueDay,d:h.days,nt:h.note})),
+      hb: (c.habits||[]).map(h=>({nm:h.name,ci:h.colorIdx,m:h.mins,w:h.when,d:h.days})),
+    };
+    const json = JSON.stringify(slim);
+    const compressed = LZString.compressToEncodedURIComponent(json);
+    const url = location.href.split('#')[0] + '#v=' + compressed;
 
-    // Copy to clipboard
-    navigator.clipboard.writeText(url).then(()=>{
+    const showShareModal = () => {
       showModal({
         title:'🔗 Share link ready!',
-        body:`<p style="color:var(--ink3);font-size:.88rem;margin-bottom:.85rem">Link copied to clipboard! Anyone who opens it will see ${esc(ch().name||"this")} 's schedule pre-loaded.</p>
-          <div style="background:#F8FAFC;border:1.5px solid var(--border);border-radius:8px;padding:.6rem .8rem;font-size:.75rem;word-break:break-all;color:var(--ink3);max-height:80px;overflow:auto">${esc(url)}</div>`,
+        body:`<p style="color:var(--ink3);font-size:.88rem;margin-bottom:.75rem">Copied! Anyone who opens it will see a <strong>view-only</strong> schedule — they can't edit it.</p>
+          <input type="text" value="${url.replace(/"/g,'&quot;')}" readonly onclick="this.select()" style="width:100%;padding:.45rem .7rem;border:1.5px solid var(--border);border-radius:8px;font-size:.72rem;background:#F8FAFC;cursor:text;word-break:break-all">`,
         confirmLabel:'Done',
         onConfirm:()=>{}
       });
-    }).catch(()=>{
-      // Fallback: show URL in modal for manual copy
-      showModal({
-        title:'🔗 Your share link',
-        body:`<p style="color:var(--ink3);font-size:.88rem;margin-bottom:.85rem">Copy this link and send it to anyone:</p>
-          <input type="text" value="${esc(url)}" readonly onclick="this.select()" style="width:100%;padding:.5rem .7rem;border:1.5px solid var(--border);border-radius:8px;font-size:.75rem;background:#F8FAFC;cursor:text">
-          <p style="color:var(--ink3);font-size:.78rem;margin-top:.5rem">Click the box to select, then copy.</p>`,
-        confirmLabel:'Done',
-        onConfirm:()=>{}
-      });
-    });
+    };
+
+    navigator.clipboard.writeText(url).then(showShareModal).catch(showShareModal);
   } catch(e) {
     showModal({
       title:'Could not generate link',
-      body:`<p style="color:var(--ink3);font-size:.88rem">Schedule data may be too large to encode as a URL. Try exporting as PDF instead.</p>`,
-      confirmLabel:'OK',
-      onConfirm:()=>{}
+      body:`<p style="color:var(--ink3);font-size:.88rem">Try again or export as PDF instead.</p>`,
+      confirmLabel:'OK', onConfirm:()=>{}
     });
   }
 }
 
-// ── Load from share hash on page load ──
+// ── Load from share hash — VIEW ONLY ──
 function loadFromHash(){
   try {
     const hash = location.hash;
-    if(!hash.startsWith('#share=')) return;
-    const encoded = hash.slice(7);
-    const payload = JSON.parse(decodeURIComponent(escape(atob(encoded))));
-    if(!payload.child) return;
-    // Add or replace matching child
-    const incoming = sanitiseChild(payload.child);
-    const existing = S.children.findIndex(c => c.name === incoming.name);
-    if(existing >= 0){
-      S.children[existing] = incoming;
-      S.activeIdx = existing;
-    } else {
-      S.children.push(incoming);
-      S.activeIdx = S.children.length - 1;
-    }
-    if(payload.activityNames) S.activityNames = [...new Set([...S.activityNames, ...payload.activityNames])];
-    if(payload.locationNames) S.locationNames = [...new Set([...S.locationNames, ...payload.locationNames])];
-    save();
-    // Clear hash from URL cleanly
-    history.replaceState(null, '', location.pathname + location.search);
-    // Go straight to preview
-    step = 4;
-    showModal({
-      title:`📅 Schedule loaded!`,
-      body:`<p style="color:var(--ink3);font-size:.88rem">${esc(incoming.name||'A child')}'s schedule has been added. You can review or edit it before printing.</p>`,
-      confirmLabel:'View schedule',
-      onConfirm:()=>{ render(); }
+    if(!hash.startsWith('#v=')) return;
+    const compressed = hash.slice(3);
+    const json = LZString.decompressFromEncodedURIComponent(compressed);
+    if(!json) return;
+    const slim = JSON.parse(json);
+
+    // Reconstruct a full child object from slim format
+    const c = sanitiseChild({
+      name: slim.n, wakeTime: slim.w, schoolStart: slim.ss,
+      schoolEnd: slim.se, sleepTarget: slim.st, schoolDays: slim.sd,
+      activities: (slim.a||[]).map(a=>({
+        name:a.nm, colorIdx:a.ci, start:a.s, end:a.e, days:a.d||[],
+        perDay:a.pd, daySlots:a.ds||{}, note:a.nt,
+        transTo:a.tt, transFrom:a.tf, transMins:a.tm, location:a.loc
+      })),
+      homework: (slim.h||[]).map(h=>({name:h.nm,colorIdx:h.ci,estMins:h.m,dueDay:h.dd,days:h.d||[],note:h.nt})),
+      habits: (slim.hb||[]).map(h=>({name:h.nm,colorIdx:h.ci,mins:h.m,when:h.w,days:h.d||[]})),
     });
+
+    // Clear hash so it doesn't persist
+    history.replaceState(null, '', location.pathname + location.search);
+
+    // Show read-only view — don't touch user's own saved data
+    showReadOnly(c);
   } catch(e) {
     // Silently ignore malformed hashes
   }
+}
+
+function showReadOnly(c){
+  // Hide the main app, show a clean view-only schedule
+  document.getElementById('app').style.display = 'none';
+
+  const rows = buildRows(c);
+  const tableHTML = buildTableHTML(rows);
+  const legendItems = [
+    {name:'School',bg:'#DBEAFE',tx:'#1E40AF'},
+    {name:'Bedtime',bg:'#F5F3FF',tx:'#4C1D95'},
+    ...(c.activities||[]).map(a=>({name:a.name||'',bg:COLORS[a.colorIdx||0].bg,tx:COLORS[a.colorIdx||0].tx})),
+    ...(c.homework||[]).filter(h=>h.name).map(h=>({name:h.name,bg:COLORS[h.colorIdx||0].bg,tx:COLORS[h.colorIdx||0].tx})),
+    ...(c.habits||[]).filter(h=>h.name).map(h=>({name:h.name,bg:COLORS[h.colorIdx||0].bg,tx:COLORS[h.colorIdx||0].tx})),
+  ].filter((v,i,a)=>v.name&&a.findIndex(x=>x.name===v.name)===i);
+
+  const legend = legendItems.map(it=>`<span class="legend-chip" style="background:${it.bg};color:${it.tx}">${esc(it.name)}</span>`).join('');
+
+  const viewer = document.createElement('div');
+  viewer.style.cssText = 'max-width:900px;margin:0 auto;padding:1.5rem 1.25rem 3rem;font-family:Lato,sans-serif';
+  viewer.innerHTML = `
+    <div style="text-align:center;padding:1.5rem 0 1rem">
+      <div style="font-family:Nunito,sans-serif;font-size:1.8rem;font-weight:900;color:#E8622A;letter-spacing:-1px">Week<span style="color:#2A9D8F">wise</span> ⭐</div>
+    </div>
+    <div style="background:#FFFCF7;border:1.5px solid #E8DDD0;border-radius:12px;padding:1.5rem;box-shadow:0 2px 16px rgba(44,36,22,.08)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:.75rem">
+        <div>
+          <div style="font-family:Nunito,sans-serif;font-size:1.3rem;font-weight:800;color:#2C2416">⭐ ${esc(c.name||'Schedule')}'s Weekly Schedule</div>
+          <div style="font-size:.82rem;color:#9C8E7E;margin-top:.2rem">View only — shared with you via Weekwise</div>
+        </div>
+        <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+          <button onclick="doPrintFromViewer()" style="font-family:Nunito,sans-serif;font-weight:800;font-size:.88rem;padding:.55rem 1.2rem;background:#2A9D8F;color:#fff;border:none;border-radius:8px;cursor:pointer">🖨️ Print / Save PDF</button>
+          <a href="${location.href.split('#')[0]}" style="font-family:Nunito,sans-serif;font-weight:800;font-size:.88rem;padding:.55rem 1.2rem;background:transparent;color:#5C5040;border:1.5px solid #E8DDD0;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center">Make my own ✨</a>
+        </div>
+      </div>
+      <div class="legend-bar">${legend}</div>
+      <div style="overflow-x:auto">${tableHTML}</div>
+    </div>
+    <div style="text-align:center;font-size:.75rem;color:#9C8E7E;margin-top:1.25rem">Built by Minh Tran · <a href="${location.href.split('#')[0]}" style="color:#E8622A;text-decoration:none">Create your own at Weekwise</a></div>
+  `;
+  document.body.appendChild(viewer);
+
+  // Store c for printing
+  window._viewOnlyChild = c;
+}
+
+function doPrintFromViewer(){
+  const c = window._viewOnlyChild;
+  if(!c) return;
+  const html = buildPrintHTML(c);
+  const win = window.open('','_blank');
+  if(!win) return;
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  setTimeout(()=>{ win.print(); }, 400);
 }
 
 // ══════════════════════════════════════════════
@@ -1177,10 +1229,6 @@ function buildRows(c){
     else if(a.daySlots){ Object.values(a.daySlots).forEach(sl=>{ if(sl.on&&sl.start) timeSet.add(sl.start); }); }
   });
   const sorted=[...timeSet].sort();
-
-  // homework row (insert before sleep)
-  const hasHw=(c.homework||[]).some(h=>h.name)||(c.habits||[]).some(h=>h.name);
-  if(hasHw) sorted.push('homework');
   sorted.push('sleep');
 
   return sorted.map(t=>{
@@ -1192,7 +1240,7 @@ function buildRows(c){
       if(t===c.schoolStart && schoolDays.includes(di)){
         items.push({label:`School\n${c.schoolStart}–${c.schoolEnd}`,bg:'#DBEAFE',tx:'#1E40AF',transport:false});
       }
-      if(t!=='sleep'&&t!=='homework'&&t!==c.wakeTime&&t!==c.schoolStart){
+      if(t!=='sleep'&&t!==c.wakeTime&&t!==c.schoolStart){
         (c.activities||[]).forEach(a=>{
           let on=false,start=a.start,end=a.end,location='',transTo='',transFrom='',transMins='';
           if(!a.perDay){
@@ -1223,26 +1271,12 @@ function buildRows(c){
           }
         });
       }
-      if(t==='homework'){
-        (c.homework||[]).forEach(h=>{
-          if(!(h.days||[]).includes(di)||!h.name) return;
-          const col=COLORS[h.colorIdx||0];
-          const due=h.dueDay==='any'?'':h.dueDay==='weekdays'?` (due weekdays)`:` (due ${DAYS[h.dueDay]})`;
-          items.push({label:`${h.name}${h.estMins?' ~'+h.estMins+'min':''} [ ]${due}`,bg:col.bg,tx:col.tx,transport:false});
-        });
-        (c.habits||[]).forEach(h=>{
-          if(!(h.days||[]).includes(di)||!h.name) return;
-          const col=COLORS[h.colorIdx||0];
-          const when=h.when==='morning'?'🌅':h.when==='afternoon'?'☀️':h.when==='evening'?'🌙':'';
-          items.push({label:`${when} ${h.name}${h.mins?' ~'+h.mins+'min':''} [ ]`.trim(),bg:col.bg,tx:col.tx,transport:false});
-        });
-      }
       if(t==='sleep'){
         items.push({label:`Sleep ${c.sleepTarget}`,bg:'#F5F3FF',tx:'#4C1D95',transport:false});
       }
       return items;
     });
-    return {time: t==='sleep'?'😴':t==='homework'?'HW':t, cells};
+    return {time: t==='sleep'?'😴':t, cells};
   });
 }
 
